@@ -57,7 +57,6 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
   private Invocable invocable;
   private Schema schema;
   private final Config config;
-  private ScriptTransformContext scriptContext;
 
   /**
    * Configuration for the script transform.
@@ -90,18 +89,18 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
   public void configurePipeline(PipelineConfigurer pipelineConfigurer) throws IllegalArgumentException {
     super.configurePipeline(pipelineConfigurer);
     // try evaluating the script to fail application creation if the script is invalid
-    init(null);
+    init();
   }
 
   @Override
   public void initialize(TransformContext context) {
-    init(context);
+    init();
   }
 
   @Override
   public void transform(StructuredRecord input, Emitter<StructuredRecord> emitter) {
     try {
-      engine.put("_global_ctx", scriptContext);
+      engine.put("_global_ctx", createContext());
       engine.eval(String.format("var %s = %s;", VARIABLE_NAME, GSON.toJson(input)));
       Map scriptOutput = (Map) invocable.invokeFunction(FUNCTION_NAME);
       StructuredRecord output = decodeRecord(scriptOutput, schema == null ? input.getSchema() : schema);
@@ -111,8 +110,8 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
     }
   }
 
-  protected ScriptTransformContext createContext(TransformContext context) {
-    return new ScriptTransformContext(context);
+  protected ScriptTransformContext createContext() {
+    return new ScriptTransformContext(getContext());
   }
 
   private Object decode(Object object, Schema schema) {
@@ -218,11 +217,10 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
     throw new RuntimeException("Unable decode union with schema " + schemas);
   }
 
-  private void init(TransformContext context) {
+  private void init() {
     ScriptEngineManager manager = new ScriptEngineManager();
-    scriptContext = createContext(context);
     engine = manager.getEngineByName("JavaScript");
-    engine.put("_global_ctx", scriptContext);
+    engine.put("_global_ctx", createContext());
     try {
       // this is pretty ugly, but doing this so that we can pass the 'input' json into the transform function.
       // that is, we want people to implement

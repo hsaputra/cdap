@@ -34,10 +34,10 @@ import java.util.Map;
  */
 public class ScriptTransformTest {
 
-  private static final ScriptTransformContext TEST_CONTEXT = new ScriptTransformContext() {
+  private static final ScriptTransformContext TEST_CONTEXT = new ScriptTransformContext(null) {
     @Override
-    public Object lookup(String dataset, String column) {
-      return dataset + ":" + column;
+    public Object lookup(String instance, String key, String column) {
+      return key + ":" + column;
     }
   };
 
@@ -138,7 +138,7 @@ public class ScriptTransformTest {
   public void testLookup() throws Exception {
     ScriptTransform.Config config = new TestScriptTransform.Config(
       "function transform(x, ctx) { " +
-        "x.stringField = x.stringField + '..hi..' + ctx.lookup('a', 'b'); return x; }", null);
+        "x.stringField = x.stringField + '..hi..' + ctx.lookup('purchases', 'a', 'b'); return x; }", null);
     Transform<StructuredRecord, StructuredRecord> transform = new TestScriptTransform(config);
     transform.initialize(null);
 
