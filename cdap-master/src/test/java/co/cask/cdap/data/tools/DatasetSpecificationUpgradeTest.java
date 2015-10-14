@@ -42,7 +42,7 @@ public class DatasetSpecificationUpgradeTest {
       properties(ImmutableMap.of(Table.PROPERTY_TTL, "3600")).
       datasets(ImmutableList.<DatasetSpecification>of()).build();
 
-    Assert.assertEquals(expected, datasetSpecificationUpgrader.updateTTLInSpecification(specification));
+    Assert.assertEquals(expected, datasetSpecificationUpgrader.updateTTLInSpecification(specification, null));
 
     DatasetSpecification nestedSpec = DatasetSpecification.builder("dataset2", "Table").
       properties(ImmutableMap.of(Table.PROPERTY_TTL, "7200000")).datasets(specification).build();
@@ -50,14 +50,14 @@ public class DatasetSpecificationUpgradeTest {
     // TTL should be converted to seconds for both parent and nested specs
     DatasetSpecification expected2 = DatasetSpecification.builder("dataset2", "Table").
       properties(ImmutableMap.of(Table.PROPERTY_TTL, "7200")).
-      datasets(DatasetSpecification.builder("dataset2.dataset1", "Table").
+      datasets(DatasetSpecification.builder("dataset1", "Table").
         properties(ImmutableMap.of(Table.PROPERTY_TTL, "3600")).
         datasets(ImmutableList.<DatasetSpecification>of()).
         build()).
       build();
-    Assert.assertEquals(expected2, datasetSpecificationUpgrader.updateTTLInSpecification(nestedSpec));
+    Assert.assertEquals(expected2, datasetSpecificationUpgrader.updateTTLInSpecification(nestedSpec, null));
 
     specification = DatasetSpecification.builder("dataset3", "Table").build();
-    Assert.assertEquals(specification, datasetSpecificationUpgrader.updateTTLInSpecification(specification));
+    Assert.assertEquals(specification, datasetSpecificationUpgrader.updateTTLInSpecification(specification, null));
   }
 }

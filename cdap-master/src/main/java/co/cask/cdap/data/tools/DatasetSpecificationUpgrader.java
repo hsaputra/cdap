@@ -44,10 +44,10 @@ import java.util.NavigableMap;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 
 /**
  * Upgrading from CDAP version < 3.3 to CDAP version 3.3.
- * <p>
  * This requires updating the TTL property for DatasetSpecification in the DatasetInstanceMDS table.
  */
 public class DatasetSpecificationUpgrader {
@@ -77,7 +77,7 @@ public class DatasetSpecificationUpgrader {
     TableId datasetSpecId = TableId.from(Id.Namespace.SYSTEM.getId(), DatasetMetaTableUtil.INSTANCE_TABLE_NAME);
     HBaseAdmin hBaseAdmin = new HBaseAdmin(conf);
     if (!tableUtil.tableExists(hBaseAdmin, datasetSpecId)) {
-      LOG.info("Dataset instance table does not exist: {}. Should not happen", datasetSpecId);
+      LOG.error("Dataset instance table does not exist: {}. Should not happen", datasetSpecId);
       return;
     }
 
@@ -99,7 +99,7 @@ public class DatasetSpecificationUpgrader {
                 byte[] colVal = columnEntry.getValue();
                 String specEntry = Bytes.toString(colVal);
                 DatasetSpecification specification = GSON.fromJson(specEntry, DatasetSpecification.class);
-                DatasetSpecification updatedSpec = updateTTLInSpecification(specification);
+                DatasetSpecification updatedSpec = updateTTLInSpecification(specification, null);
                 colVal = Bytes.toBytes(GSON.toJson(updatedSpec));
                 put.add(familyMap.getKey(), columnMap.getKey(), timeStamp, colVal);
               }
@@ -125,13 +125,18 @@ public class DatasetSpecificationUpgrader {
   }
 
   @VisibleForTesting
-  DatasetSpecification updateTTLInSpecification(DatasetSpecification specification) {
+  DatasetSpecification updateTTLInSpecification(DatasetSpecification specification, @Nullable String parentName) {
     Map<String, String> properties = updatedProperties(specification.getProperties());
     List<DatasetSpecification> updatedSpecs = new ArrayList<>();
     for (DatasetSpecification datasetSpecification : specification.getSpecifications().values()) {
-      updatedSpecs.add(updateTTLInSpecification(datasetSpecification));
+      updatedSpecs.add(updateTTLInSpecification(datasetSpecification, specification.getName()));
     }
-    return DatasetSpecification.builder(specification.getName(),
+
+    String specName = specification.getName();
+    if (parentName != null && specification.getName().startsWith(parentName)) {
+      specName = specification.getName().substring(parentName.length() + 1);
+    }
+    return DatasetSpecification.builder(specName,
                                         specification.getType()).properties(properties).datasets(updatedSpecs).build();
   }
 }

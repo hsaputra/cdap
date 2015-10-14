@@ -84,9 +84,9 @@ public class HBaseTableAdmin extends AbstractHBaseDataSetAdmin {
     String ttlProp = spec.getProperties().get(Table.PROPERTY_TTL);
     if (ttlProp != null) {
       long ttl = Long.parseLong(ttlProp);
-      // convert ttl from seconds to milli-seconds
-      ttl = TimeUnit.SECONDS.toMillis(ttl);
       if (ttl > 0) {
+        // convert ttl from seconds to milli-seconds
+        ttl = TimeUnit.SECONDS.toMillis(ttl);
         columnDescriptor.setValue(TxConstants.PROPERTY_TTL, String.valueOf(ttl));
       }
     }
@@ -135,9 +135,9 @@ public class HBaseTableAdmin extends AbstractHBaseDataSetAdmin {
       tableUtil.setBloomFilter(columnDescriptor, HBaseTableUtil.BloomType.ROW);
       needUpgrade = true;
     }
-    // ttl not null, convert to millis
     String ttlInMillis = null;
     if (spec.getProperty(Table.PROPERTY_TTL) != null) {
+      // ttl not null, convert to millis
       ttlInMillis = String.valueOf(TimeUnit.SECONDS.toMillis(Long.valueOf(spec.getProperty(Table.PROPERTY_TTL))));
     }
 

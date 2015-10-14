@@ -152,7 +152,7 @@ public class HBaseTableTest extends BufferingTableTest<BufferingTable> {
     table.put(b("row1"), b("col1"), b("val1"));
     table.commitTx();
 
-    TimeUnit.SECONDS.sleep(2);
+    TimeUnit.MILLISECONDS.sleep(1010);
 
     tx = txSystemClient.startShort();
     table.startTx(tx);
