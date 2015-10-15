@@ -161,7 +161,6 @@ Aggregator.prototype.pushConfiguration = function(resource) {
       config = JSON.parse(configString);
       statusCode = 200;
     } catch(e) {
-      log.info(e);
       statusCode = 500;
       config = 'CONFIG_SYNTAX_JSON_ERROR';
     }
