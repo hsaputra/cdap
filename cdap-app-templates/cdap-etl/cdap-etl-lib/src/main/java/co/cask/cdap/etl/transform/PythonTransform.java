@@ -27,59 +27,54 @@ import co.cask.cdap.etl.api.Emitter;
 import co.cask.cdap.etl.api.PipelineConfigurer;
 import co.cask.cdap.etl.api.Transform;
 import co.cask.cdap.etl.api.TransformContext;
-import co.cask.cdap.etl.common.StructuredRecordSerializer;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
+import org.python.core.Py;
+import org.python.core.PyCode;
+import org.python.util.PythonInterpreter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javax.annotation.Nullable;
-import javax.script.Invocable;
-import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
-import javax.script.ScriptException;
 
 /**
- * Transforms records using custom javascript provided by the config.
+ * Filters records using custom Python provided by the config.
  */
 @Plugin(type = "transform")
-@Name("Script")
-@Description("Executes user-provided Javascript that transforms one record into another.")
-public class ScriptTransform extends Transform<StructuredRecord, StructuredRecord> {
-  private static final Gson GSON = new GsonBuilder()
-    .registerTypeAdapter(StructuredRecord.class, new StructuredRecordSerializer())
-    .create();
-  private static final String FUNCTION_NAME = "dont_name_your_function_this";
+@Name("PythonScript")
+@Description("Executes user-provided Python that transforms one record into another.")
+public class PythonTransform extends Transform<StructuredRecord, StructuredRecord> {
+  private static final String OUTPUT_VARIABLE_NAME = "out";
   private static final String VARIABLE_NAME = "dont_name_your_variable_this";
   private static final String CONTEXT_NAME = "dont_name_your_context_this";
-  private ScriptEngine engine;
-  private Invocable invocable;
   private Schema schema;
   private final Config config;
   private Metrics metrics;
   private Logger logger;
+  private PythonInterpreter interpreter;
+  private PyCode compile;
 
   /**
    * Configuration for the script transform.
    */
   public static class Config extends PluginConfig {
-    @Description("Javascript defining how to transform one record into another. The script must implement a function " +
-      "called 'transform', which takes as input a JSON object representing the input record " +
+    @Description("Python defining how to transform one record into another. The script must implement a function " +
+      "called 'transform', which takes as input a dictionary representing the input record " +
       "and a context object (which contains CDAP metrics and logger), and returns " +
-      "a JSON object that represents the transformed input. " +
+      "a dictionary that represents the transformed input. " +
       "For example: " +
-      "'function transform(input, context) {" +
-      "  input.count = input.count * 1024; " +
-      "  if(input.count < 0) {" +
-      "    context.getMetrics().count(\"negative.count\", 1);" +
-      "    context.getLogger().debug(\"Received record with negative count\");" +
-      "  }" +
-      "return input; }' " +
+      "'def transform(input, context):" +
+      "  input['count'] *= 1024" +
+      "  if(input['count'] < 0):" +
+      "    context.getMetrics().count(\"negative.count\", 1)" +
+      "    context.getLogger().debug(\"Received record with negative count\")" +
+      "  return input' " +
       "will scale the 'count' field by 1024.")
     private final String script;
 
@@ -95,7 +90,7 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
   }
 
   // for unit tests, otherwise config is injected by plugin framework.
-  public ScriptTransform(Config config) {
+  public PythonTransform(Config config) {
     this.config = config;
   }
 
@@ -109,20 +104,90 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
   @Override
   public void initialize(TransformContext context) {
     metrics = context.getMetrics();
-    logger = LoggerFactory.getLogger(ScriptTransform.class.getName() + " - Stage:" + context.getStageId());
+    logger = LoggerFactory.getLogger(PythonTransform.class.getName() + " - Stage:" + context.getStageId());
     init();
   }
 
   @Override
   public void transform(StructuredRecord input, Emitter<StructuredRecord> emitter) {
     try {
-      engine.eval(String.format("var %s = %s;", VARIABLE_NAME, GSON.toJson(input)));
-      Map scriptOutput = (Map) invocable.invokeFunction(FUNCTION_NAME);
+      interpreter.set(VARIABLE_NAME, encode(input, input.getSchema()));
+      Py.runCode(compile, interpreter.getLocals(), interpreter.getLocals());
+
+      Map scriptOutput = Py.tojava(interpreter.get(OUTPUT_VARIABLE_NAME), Map.class);
       StructuredRecord output = decodeRecord(scriptOutput, schema == null ? input.getSchema() : schema);
       emitter.emit(output);
     } catch (Exception e) {
       throw new IllegalArgumentException("Could not transform input: " + e.getMessage(), e);
     }
+  }
+
+  private Object encode(Object object, Schema schema) {
+    Schema.Type type = schema.getType();
+
+    switch (type) {
+      case NULL:
+      case BOOLEAN:
+      case INT:
+      case LONG:
+      case FLOAT:
+      case DOUBLE:
+      case BYTES:
+      case STRING:
+        return object;
+      case ENUM:
+        break;
+      case ARRAY:
+        return encodeArray((List) object, schema.getComponentSchema());
+      case MAP:
+        Schema keySchema = schema.getMapSchema().getKey();
+        Schema valSchema = schema.getMapSchema().getValue();
+        // Should be fine to cast since schema tells us what it is.
+        //noinspection unchecked
+        return encodeMap((Map<Object, Object>) object, keySchema, valSchema);
+      case RECORD:
+        return encodeRecord((StructuredRecord) object, schema);
+      case UNION:
+        return encodeUnion(object, schema.getUnionSchemas());
+    }
+
+    throw new RuntimeException("Unable decode object with schema " + schema);
+  }
+
+  private Object encodeRecord(StructuredRecord record, Schema schema) {
+    Map<String, Object> map = new HashMap<>();
+    for (Schema.Field field : schema.getFields()) {
+      map.put(field.getName(), encode(record.get(field.getName()), field.getSchema()));
+    }
+    return map;
+  }
+
+  private Object encodeUnion(Object object, List<Schema> unionSchemas) {
+    for (Schema schema : unionSchemas) {
+      try {
+        return encode(object, schema);
+      } catch (Exception e) {
+        // could be ok, just move on and try the next schema
+      }
+    }
+
+    throw new RuntimeException("Unable decode union with schema " + unionSchemas);
+  }
+
+  private Object encodeMap(Map<Object, Object> map, Schema keySchema, Schema valSchema) {
+    Map<Object, Object> encoded = new HashMap<>();
+    for (Map.Entry<Object, Object> entry : map.entrySet()) {
+      encoded.put(encode(entry.getKey(), keySchema), encode(entry.getValue(), valSchema));
+    }
+    return encoded;
+  }
+
+  private Object encodeArray(List list, Schema componentSchema) {
+    List<Object> encoded = new ArrayList<>();
+    for (Object object : list) {
+      encoded.add(encode(object, componentSchema));
+    }
+    return encoded;
   }
 
   private Object decode(Object object, Schema schema) {
@@ -173,21 +238,17 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
     switch (type) {
       case NULL:
         return null;
-      // numbers come back as doubles
       case INT:
-        return ((Double) object).intValue();
+        return (Integer) object;
       case LONG:
-        return ((Double) object).longValue();
-      case FLOAT:
-        return ((Double) object).floatValue();
-      case BYTES:
-        List byteArr = (List) object;
-        byte[] output = new byte[byteArr.size()];
-        for (int i = 0; i < output.length; i++) {
-          // everything is a double
-          output[i] = ((Double) byteArr.get(i)).byteValue();
+        if (object instanceof BigInteger) {
+          return ((BigInteger) object).longValue();
         }
-        return output;
+        return (Long) object;
+      case FLOAT:
+        return (Float) object;
+      case BYTES:
+        return (byte[]) object;
       case DOUBLE:
         // case so that if it's not really a double it will fail. This is possible for unions,
         // where we don't know what the actual type of the object should be.
@@ -229,23 +290,18 @@ public class ScriptTransform extends Transform<StructuredRecord, StructuredRecor
   }
 
   private void init() {
-    ScriptEngineManager manager = new ScriptEngineManager();
-    engine = manager.getEngineByName("JavaScript");
-    engine.put(CONTEXT_NAME, new ScriptContext(logger, metrics));
+    interpreter = new PythonInterpreter();
+    interpreter.set(CONTEXT_NAME, new ScriptContext(logger, metrics));
 
-    try {
-      // this is pretty ugly, but doing this so that we can pass the 'input' json into the transform function.
-      // that is, we want people to implement
-      // function transform(input) { ... }
-      // rather than function transform() { ... } and have them access a global variable in the function
+    // this is pretty ugly, but doing this so that we can pass the 'input' json into the transform function.
+    // that is, we want people to implement
+    // function transform(input) { ... }
+    // rather than function transform() { ... } and have them access a global variable in the function
 
-      String script = String.format("function %s() { return transform(%s, %s); }\n%s",
-        FUNCTION_NAME, VARIABLE_NAME, CONTEXT_NAME, config.script);
-      engine.eval(script);
-    } catch (ScriptException e) {
-      throw new IllegalArgumentException("Invalid script: " + e.getMessage(), e);
-    }
-    invocable = (Invocable) engine;
+    // TODO: change the variable name from 'out'
+    String script = String.format("%s\n%s = transform(%s, %s)",
+                                  config.script, OUTPUT_VARIABLE_NAME, VARIABLE_NAME, CONTEXT_NAME);
+    compile = interpreter.compile(script);
     if (config.schema != null) {
       try {
         schema = Schema.parseJson(config.schema);

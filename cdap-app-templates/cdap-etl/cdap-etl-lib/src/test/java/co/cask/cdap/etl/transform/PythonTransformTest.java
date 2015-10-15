@@ -22,20 +22,29 @@ import co.cask.cdap.api.data.schema.Schema;
 import co.cask.cdap.etl.api.Transform;
 import co.cask.cdap.etl.common.MockEmitter;
 import co.cask.cdap.etl.common.MockMetrics;
+import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import org.junit.Assert;
 import org.junit.Test;
+import org.python.core.Py;
+import org.python.core.PyCode;
+import org.python.core.PyObject;
+import org.python.util.PythonInterpreter;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import javax.script.ScriptEngine;
+import javax.script.ScriptEngineManager;
+import javax.script.ScriptException;
 
 /**
  *
  */
-public class ScriptTransformTest {
+public class PythonTransformTest {
+
   private static final Schema SCHEMA = Schema.recordOf("record",
     Schema.Field.of("booleanField", Schema.of(Schema.Type.BOOLEAN)),
     Schema.Field.of("intField", Schema.of(Schema.Type.INT)),
@@ -77,9 +86,12 @@ public class ScriptTransformTest {
 
   @Test
   public void testSimple() throws Exception {
-    ScriptTransform.Config config = new ScriptTransform.Config(
-      "function transform(x, context) { x.intField = x.intField * 1024; return x; }", null);
-    Transform<StructuredRecord, StructuredRecord> transform = new ScriptTransform(config);
+    PythonTransform.Config config = new PythonTransform.Config(
+      "def transform(x, context):\n" +
+      "  x['intField'] *= 1024\n" +
+      "  return x",
+      null);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonTransform(config);
     transform.initialize(new MockTransformContext());
 
     MockEmitter<StructuredRecord> emitter = new MockEmitter<>();
@@ -106,6 +118,7 @@ public class ScriptTransformTest {
     // check record2
     transform.transform(RECORD2, emitter);
     output = emitter.getEmitted().get(0);
+
     Assert.assertEquals(SCHEMA, output.getSchema());
     Assert.assertFalse((Boolean) output.get("booleanField"));
     Assert.assertEquals(-28 * 1024, output.get("intField"));
@@ -128,10 +141,10 @@ public class ScriptTransformTest {
       "smallerSchema",
       Schema.Field.of("x", Schema.of(Schema.Type.INT)),
       Schema.Field.of("y", Schema.of(Schema.Type.LONG)));
-    ScriptTransform.Config config = new ScriptTransform.Config(
-      "function transform(input, context) { return { 'x':input.intField, 'y':input.longField }; }",
+    PythonTransform.Config config = new PythonTransform.Config(
+      "def transform(input, context): return { 'x':input['intField'], 'y':input['longField'] }",
       outputSchema.toString());
-    Transform<StructuredRecord, StructuredRecord> transform = new ScriptTransform(config);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonTransform(config);
     transform.initialize(new MockTransformContext());
 
     MockEmitter<StructuredRecord> emitter = new MockEmitter<>();
@@ -153,7 +166,7 @@ public class ScriptTransformTest {
       "inner1",
       Schema.Field.of("list",
         Schema.arrayOf(Schema.mapOf(
-          Schema.of(Schema.Type.STRING), inner2Schema)
+                         Schema.of(Schema.Type.STRING), inner2Schema)
       ))
     );
     Schema schema = Schema.recordOf(
@@ -194,25 +207,24 @@ public class ScriptTransformTest {
       .build();
 
     Schema outputSchema = Schema.recordOf("output", Schema.Field.of("x", Schema.of(Schema.Type.DOUBLE)));
-    ScriptTransform.Config config = new ScriptTransform.Config(
-      "function transform(input, context) {\n" +
-      "  var pi = input.inner1.list[0].p;\n" +
-      "  var e = input.inner1.list[0].e;\n" +
-      "  var val = power(pi.val, 3) + power(e.val, 2);\n" +
-      "  print(pi); print(e);\n print(context);\n" +
-      "  context.getMetrics().count(\"script.transform.count\", 1);\n" +
-      "  context.getLogger().info(\"Log test from Script Transform\");\n" +
-      "  return { 'x':val };\n" +
-      "}" +
-      "function power(x, y) { \n" +
-      "  var ans = 1; \n" +
-      "  for (i = 0; i < y; i++) { \n" +
-      "    ans = ans * x;\n" +
-      "  }\n" +
-      "  return ans;\n" +
-      "}",
+    PythonTransform.Config config = new PythonTransform.Config(
+      "def transform(input, context):\n" +
+        "  pi = input['inner1']['list'][0]['p']\n" +
+        "  e = input['inner1']['list'][0]['e']\n" +
+        "  val = power(pi['val'], 3) + power(e['val'], 2)\n" +
+        "  print(pi); print(e); print(context);\n" +
+        "  context.getMetrics().count(\"script.transform.count\", 1)\n" +
+        "  context.getLogger().info(\"Log test from Script Transform\")\n" +
+        "  return { 'x':val }\n" +
+        "" +
+        "def power(x, y):\n" +
+        "  ans = 1\n" +
+        "  for i in range(y):\n" +
+        "    ans = ans * x\n" +
+        "  return ans\n" +
+        "",
       outputSchema.toString());
-    Transform<StructuredRecord, StructuredRecord> transform = new ScriptTransform(config);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonTransform(config);
     MockMetrics mockMetrics = new MockMetrics();
     transform.initialize(new MockTransformContext(new HashMap<String, String>(), mockMetrics));
 
