@@ -24,6 +24,7 @@ import co.cask.cdap.api.data.schema.Schema;
 import co.cask.cdap.api.metrics.Metrics;
 import co.cask.cdap.api.plugin.PluginConfig;
 import co.cask.cdap.etl.api.Emitter;
+import co.cask.cdap.etl.api.InvalidEntry;
 import co.cask.cdap.etl.api.PipelineConfigurer;
 import co.cask.cdap.etl.api.Transform;
 import co.cask.cdap.etl.api.TransformContext;
@@ -44,21 +45,22 @@ import java.util.Map;
 import javax.annotation.Nullable;
 
 /**
- * Filters records using custom Python provided by the config.
+ * Transforms records using custom Python provided by the config.
  */
 @Plugin(type = "transform")
-@Name("PythonScript")
+@Name("PythonEvaluator")
 @Description("Executes user-provided Python that transforms one record into another.")
-public class PythonTransform extends Transform<StructuredRecord, StructuredRecord> {
-  private static final String OUTPUT_VARIABLE_NAME = "out";
-  private static final String VARIABLE_NAME = "dont_name_your_variable_this";
+public class PythonEvaluator extends Transform<StructuredRecord, StructuredRecord> {
+  private static final String OUTPUT_VARIABLE_NAME = "dont_name_your_variable_this0";
+  private static final String INPUT_STRUCTURED_RECORD_VARIABLE_NAME = "dont_name_your_variable_this1";
+  private static final String EMITTER_VARIABLE_NAME = "dont_name_your_variable_this2";
   private static final String CONTEXT_NAME = "dont_name_your_context_this";
   private Schema schema;
   private final Config config;
   private Metrics metrics;
   private Logger logger;
   private PythonInterpreter interpreter;
-  private PyCode compile;
+  private PyCode compiledScript;
 
   /**
    * Configuration for the script transform.
@@ -69,12 +71,12 @@ public class PythonTransform extends Transform<StructuredRecord, StructuredRecor
       "and a context object (which contains CDAP metrics and logger), and returns " +
       "a dictionary that represents the transformed input. " +
       "For example: " +
-      "'def transform(input, context):" +
+      "'def transform(input, emitter, context):" +
       "  input['count'] *= 1024" +
       "  if(input['count'] < 0):" +
       "    context.getMetrics().count(\"negative.count\", 1)" +
       "    context.getLogger().debug(\"Received record with negative count\")" +
-      "  return input' " +
+      "  emitter.emit(input)' " +
       "will scale the 'count' field by 1024.")
     private final String script;
 
@@ -90,7 +92,7 @@ public class PythonTransform extends Transform<StructuredRecord, StructuredRecor
   }
 
   // for unit tests, otherwise config is injected by plugin framework.
-  public PythonTransform(Config config) {
+  public PythonEvaluator(Config config) {
     this.config = config;
   }
 
@@ -104,19 +106,59 @@ public class PythonTransform extends Transform<StructuredRecord, StructuredRecor
   @Override
   public void initialize(TransformContext context) {
     metrics = context.getMetrics();
-    logger = LoggerFactory.getLogger(PythonTransform.class.getName() + " - Stage:" + context.getStageId());
+    logger = LoggerFactory.getLogger(PythonEvaluator.class.getName() + " - Stage:" + context.getStageId());
     init();
   }
 
   @Override
-  public void transform(StructuredRecord input, Emitter<StructuredRecord> emitter) {
-    try {
-      interpreter.set(VARIABLE_NAME, encode(input, input.getSchema()));
-      Py.runCode(compile, interpreter.getLocals(), interpreter.getLocals());
+  public void destroy() {
+    interpreter.cleanup();
+  }
 
-      Map scriptOutput = Py.tojava(interpreter.get(OUTPUT_VARIABLE_NAME), Map.class);
-      StructuredRecord output = decodeRecord(scriptOutput, schema == null ? input.getSchema() : schema);
-      emitter.emit(output);
+  /**
+   * Emitter to be used from within Python code
+   */
+  public final class PythonEmitter implements Emitter<Map> {
+
+    private final Emitter<StructuredRecord> emitter;
+    private final Schema schema;
+
+    public PythonEmitter(Emitter<StructuredRecord> emitter, Schema schema) {
+      this.emitter = emitter;
+      this.schema = schema;
+    }
+
+    @Override
+    public void emit(Map value) {
+      emitter.emit(decode(value));
+    }
+
+    @Override
+    public void emitError(InvalidEntry<Map> invalidEntry) {
+      emitter.emitError(new InvalidEntry<>(invalidEntry.getErrorCode(), invalidEntry.getErrorMsg(),
+                                           decode(invalidEntry.getInvalidRecord())));
+    }
+
+    public void emitError(Map invalidEntry) {
+      emitter.emitError(new InvalidEntry<>((int) invalidEntry.get("errorCode"),
+                                           (String) invalidEntry.get("errorMsg"),
+                                           decode((Map) invalidEntry.get("invalidRecord"))));
+
+    }
+
+    private StructuredRecord decode(Map nativeObject) {
+      return decodeRecord(nativeObject, schema);
+    }
+  }
+
+  @Override
+  public void transform(StructuredRecord input, final Emitter<StructuredRecord> emitter) {
+    try {
+      Emitter<Map> pythonEmitter = new PythonEmitter(emitter, schema == null ? input.getSchema() : schema);
+      interpreter.set(INPUT_STRUCTURED_RECORD_VARIABLE_NAME, encode(input, input.getSchema()));
+      interpreter.set(EMITTER_VARIABLE_NAME, pythonEmitter);
+      Py.runCode(compiledScript, interpreter.getLocals(), interpreter.getLocals());
+
     } catch (Exception e) {
       throw new IllegalArgumentException("Could not transform input: " + e.getMessage(), e);
     }
@@ -299,9 +341,10 @@ public class PythonTransform extends Transform<StructuredRecord, StructuredRecor
     // rather than function transform() { ... } and have them access a global variable in the function
 
     // TODO: change the variable name from 'out'
-    String script = String.format("%s\n%s = transform(%s, %s)",
-                                  config.script, OUTPUT_VARIABLE_NAME, VARIABLE_NAME, CONTEXT_NAME);
-    compile = interpreter.compile(script);
+    String script = String.format("%s\n%s = transform(%s, %s, %s)",
+                                  config.script, OUTPUT_VARIABLE_NAME, INPUT_STRUCTURED_RECORD_VARIABLE_NAME,
+                                  EMITTER_VARIABLE_NAME, CONTEXT_NAME);
+    compiledScript = interpreter.compile(script);
     if (config.schema != null) {
       try {
         schema = Schema.parseJson(config.schema);

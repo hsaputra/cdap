@@ -164,7 +164,7 @@
       <artifactId>commons-validator</artifactId>
       <version>1.4.1</version>
     </dependency>
-    <!-- Jython Transform dependency-->
+    <!-- PythonEvaluator transform dependency-->
     <dependency>
       <groupId>org.python</groupId>
       <artifactId>jython-standalone</artifactId>

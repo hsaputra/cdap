@@ -19,31 +19,24 @@ package co.cask.cdap.etl.transform;
 import co.cask.cdap.api.common.Bytes;
 import co.cask.cdap.api.data.format.StructuredRecord;
 import co.cask.cdap.api.data.schema.Schema;
+import co.cask.cdap.etl.api.InvalidEntry;
 import co.cask.cdap.etl.api.Transform;
 import co.cask.cdap.etl.common.MockEmitter;
 import co.cask.cdap.etl.common.MockMetrics;
-import com.google.common.base.Stopwatch;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import org.junit.Assert;
 import org.junit.Test;
-import org.python.core.Py;
-import org.python.core.PyCode;
-import org.python.core.PyObject;
-import org.python.util.PythonInterpreter;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
-import javax.script.ScriptException;
 
 /**
  *
  */
-public class PythonTransformTest {
+public class PythonEvaluatorTest {
 
   private static final Schema SCHEMA = Schema.recordOf("record",
     Schema.Field.of("booleanField", Schema.of(Schema.Type.BOOLEAN)),
@@ -86,12 +79,13 @@ public class PythonTransformTest {
 
   @Test
   public void testSimple() throws Exception {
-    PythonTransform.Config config = new PythonTransform.Config(
-      "def transform(x, context):\n" +
+    PythonEvaluator.Config config = new PythonEvaluator.Config(
+      "def transform(x, emitter, context):\n" +
       "  x['intField'] *= 1024\n" +
-      "  return x",
+      "  emitter.emit(x)\n" +
+      "  emitter.emit(x)",
       null);
-    Transform<StructuredRecord, StructuredRecord> transform = new PythonTransform(config);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonEvaluator(config);
     transform.initialize(new MockTransformContext());
 
     MockEmitter<StructuredRecord> emitter = new MockEmitter<>();
@@ -119,6 +113,9 @@ public class PythonTransformTest {
     transform.transform(RECORD2, emitter);
     output = emitter.getEmitted().get(0);
 
+    // we emit the same record twice, to test that functionality
+    Assert.assertEquals(output, emitter.getEmitted().get(1));
+
     Assert.assertEquals(SCHEMA, output.getSchema());
     Assert.assertFalse((Boolean) output.get("booleanField"));
     Assert.assertEquals(-28 * 1024, output.get("intField"));
@@ -136,15 +133,32 @@ public class PythonTransformTest {
   }
 
   @Test
+  public void testEmitError() throws Exception {
+    PythonEvaluator.Config config = new PythonEvaluator.Config(
+      "def transform(x, emitter, context):\n" +
+        "  emitter.emitError({\"errorCode\":31, \"errorMsg\":\"error!\", \"invalidRecord\": x})",
+      null);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonEvaluator(config);
+    transform.initialize(new MockTransformContext());
+
+    MockEmitter<StructuredRecord> emitter = new MockEmitter<>();
+    transform.transform(RECORD1, emitter);
+    InvalidEntry<StructuredRecord> invalidEntry = emitter.getErrors().get(0);
+    Assert.assertEquals(31, invalidEntry.getErrorCode());
+    Assert.assertEquals("error!", invalidEntry.getErrorMsg());
+    Assert.assertEquals(RECORD1, invalidEntry.getInvalidRecord());
+  }
+
+  @Test
   public void testDropAndRename() throws Exception {
     Schema outputSchema = Schema.recordOf(
       "smallerSchema",
       Schema.Field.of("x", Schema.of(Schema.Type.INT)),
       Schema.Field.of("y", Schema.of(Schema.Type.LONG)));
-    PythonTransform.Config config = new PythonTransform.Config(
-      "def transform(input, context): return { 'x':input['intField'], 'y':input['longField'] }",
+    PythonEvaluator.Config config = new PythonEvaluator.Config(
+      "def transform(input, emitter, context): emitter.emit({ 'x':input['intField'], 'y':input['longField'] })",
       outputSchema.toString());
-    Transform<StructuredRecord, StructuredRecord> transform = new PythonTransform(config);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonEvaluator(config);
     transform.initialize(new MockTransformContext());
 
     MockEmitter<StructuredRecord> emitter = new MockEmitter<>();
@@ -207,15 +221,15 @@ public class PythonTransformTest {
       .build();
 
     Schema outputSchema = Schema.recordOf("output", Schema.Field.of("x", Schema.of(Schema.Type.DOUBLE)));
-    PythonTransform.Config config = new PythonTransform.Config(
-      "def transform(input, context):\n" +
+    PythonEvaluator.Config config = new PythonEvaluator.Config(
+      "def transform(input, emitter, context):\n" +
         "  pi = input['inner1']['list'][0]['p']\n" +
         "  e = input['inner1']['list'][0]['e']\n" +
         "  val = power(pi['val'], 3) + power(e['val'], 2)\n" +
         "  print(pi); print(e); print(context);\n" +
         "  context.getMetrics().count(\"script.transform.count\", 1)\n" +
         "  context.getLogger().info(\"Log test from Script Transform\")\n" +
-        "  return { 'x':val }\n" +
+        "  emitter.emit({ 'x':val })\n" +
         "" +
         "def power(x, y):\n" +
         "  ans = 1\n" +
@@ -224,7 +238,7 @@ public class PythonTransformTest {
         "  return ans\n" +
         "",
       outputSchema.toString());
-    Transform<StructuredRecord, StructuredRecord> transform = new PythonTransform(config);
+    Transform<StructuredRecord, StructuredRecord> transform = new PythonEvaluator(config);
     MockMetrics mockMetrics = new MockMetrics();
     transform.initialize(new MockTransformContext(new HashMap<String, String>(), mockMetrics));
 
